@@ -1,0 +1,7 @@
+// WinFences.rc
+#include <windows.h>
+
+// App icon - used by LoadIcon(hInst, MAKEINTRESOURCE(IDI_APPICON))
+#define IDI_APPICON 101
+
+IDI_APPICON ICON "app.ico"
