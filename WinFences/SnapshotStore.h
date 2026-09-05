@@ -50,6 +50,7 @@ inline json SnapshotToJson(const Snapshot& snap)
             {"label", WideToUtf8(f.label)},
             {"col",   f.col},  {"row",  f.row},
             {"cols",  f.cols}, {"rows", f.rows},
+            {"color", static_cast<uint32_t>(f.color)},
             {"icons", icons}
         });
     }
@@ -78,6 +79,9 @@ inline Snapshot SnapshotFromJson(const json& j)
         f.row   = jf.value("row",  0);
         f.cols  = std::max(1, jf.value("cols", 1));
         f.rows  = std::max(1, jf.value("rows", 1));
+        // Snapshots written before per-fence colours simply have no "color".
+        f.color = static_cast<COLORREF>(
+            jf.value("color", static_cast<uint32_t>(FENCE_DEFAULT_COLOR)));
         if (jf.contains("icons"))
             for (const auto& ji : jf["icons"])
             {

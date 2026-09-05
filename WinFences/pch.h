@@ -24,6 +24,7 @@
 #include <dwmapi.h>
 #include <uxtheme.h>
 #include <vssym32.h>
+#include <commdlg.h>   // ChooseColor (per-fence colour picker)
 
 // COM
 #include <wrl/client.h>
@@ -69,6 +70,7 @@ using json = nlohmann::json;
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
 #pragma comment(lib, "windowscodecs.lib")
+#pragma comment(lib, "comdlg32.lib")
 
 // Convenience
 // Type-safe integer max/min that avoids LONG vs int ambiguity

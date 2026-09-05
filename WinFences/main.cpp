@@ -26,14 +26,28 @@ static HINSTANCE  g_hInst      = nullptr;
 
 // ---- Tray Icon ----
 
+static HICON g_trayIcon = nullptr;
+
 static void AddTrayIcon(HWND hwnd, HINSTANCE hInst)
 {
+    // Ask for the exact tray icon size so the .ico's dedicated small entry is
+    // used. LoadIcon would hand back the SM_CXICON (32px) variant and let the
+    // shell shrink it, which softens the pixel art.
+    const UINT dpi = GetDpiForSystem();
+    g_trayIcon = static_cast<HICON>(LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APPICON),
+        IMAGE_ICON,
+        GetSystemMetricsForDpi(SM_CXSMICON, dpi),
+        GetSystemMetricsForDpi(SM_CYSMICON, dpi),
+        LR_DEFAULTCOLOR));
+    if (!g_trayIcon)
+        g_trayIcon = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APPICON));
+
     NOTIFYICONDATAW nid = { sizeof(nid) };
     nid.hWnd             = hwnd;
     nid.uID              = TRAY_ICON_ID;
     nid.uFlags           = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = WM_TRAY;
-    nid.hIcon            = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APPICON));
+    nid.hIcon            = g_trayIcon;
     wcscpy_s(nid.szTip, L"WinFences");
     Shell_NotifyIconW(NIM_ADD, &nid);
 
@@ -48,6 +62,8 @@ static void RemoveTrayIcon(HWND hwnd)
     nid.hWnd = hwnd;
     nid.uID  = TRAY_ICON_ID;
     Shell_NotifyIconW(NIM_DELETE, &nid);
+
+    if (g_trayIcon) { DestroyIcon(g_trayIcon); g_trayIcon = nullptr; }
 }
 
 static void ShowTrayContextMenu(HWND hwnd)

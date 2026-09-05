@@ -27,6 +27,11 @@ struct FenceIconEntry
     std::wstring iconKey;   // cache key
 };
 
+// Accent colour a fence falls back to — the dark blue the app shipped with.
+// Everything a fence paints (body, header bar, border) is derived from its
+// accent colour, so one picked colour retints the whole fence coherently.
+inline constexpr COLORREF FENCE_DEFAULT_COLOR = RGB(46, 56, 115);
+
 struct FenceData
 {
     std::wstring                id;
@@ -36,6 +41,7 @@ struct FenceData
     int                         cols = 1; // size in cells — 1x1 minimum, set at creation
     int                         rows = 1;
     float                       alpha = 0.65f; // background opacity
+    COLORREF                    color = FENCE_DEFAULT_COLOR; // per-fence accent
     std::vector<FenceIconEntry> icons;
 };
 
@@ -62,6 +68,46 @@ inline std::wstring GetDisplayName(const std::wstring& path)
     std::wstring name = (slash != std::wstring::npos) ? path.substr(slash+1) : path;
     size_t dot = name.rfind(L'.');
     return (dot != std::wstring::npos) ? name.substr(0, dot) : name;
+}
+
+// True for a real filesystem path (C:\... or \\UNC\...), false for virtual
+// shell items such as ::{CLSID} or shell:AppsFolder\... .
+inline bool IsFilesystemPath(const std::wstring& s)
+{
+    if (s.size() < 2) return false;
+    if (s[0] == L':') return false;
+    if (_wcsnicmp(s.c_str(), L"shell:", 6) == 0) return false;
+    if (s[1] == L':') return true;                  // drive letter
+    if (s[0] == L'\\' && s[1] == L'\\') return true; // UNC
+    return false;
+}
+
+// Label under an icon and inside the expanded popup on selection — both read
+// FenceIconEntry::displayName, so this is the single place that decides it.
+//
+// Rule: the plain file name, except that a shortcut's ".lnk" is dropped, so
+// "Dokument.lnk" reads as "Dokument". Every other extension stays visible.
+//
+// Not GetDisplayName() for the general case on purpose: that one also hides
+// ".txt" whenever Explorer's "hide extensions for known file types" is on (the
+// Windows default), which would tie the label to a global setting instead of to
+// the actual file name. Only ".lnk" is special-cased, because a shortcut's
+// extension is an implementation detail the shell never shows either.
+//
+// Virtual shell items (Store apps, ::{CLSID}) have no file name to use, so they
+// keep the shell name.
+inline std::wstring GetFenceLabel(const std::wstring& path)
+{
+    if (!IsFilesystemPath(path)) return GetDisplayName(path);
+
+    size_t slash = path.find_last_of(L"\\/");
+    std::wstring name = (slash != std::wstring::npos) ? path.substr(slash + 1) : path;
+
+    if (name.size() > 4 &&
+        _wcsicmp(name.c_str() + name.size() - 4, L".lnk") == 0)
+        name.resize(name.size() - 4);
+
+    return name.empty() ? GetDisplayName(path) : name;
 }
 
 // ── Icon size query ───────────────────────────────────────────────────────────

@@ -1,20 +1,20 @@
 #pragma once
 // ============================================================================
-// FenceWindow.h — One fence: a Win32 window that displays a grid of icons.
+// FenceWindow.h ï¿½ One fence: a Win32 window that displays a grid of icons.
 //
 // Each fence is a layered WS_POPUP window with DWM glass background.
 // All layout is driven by FenceData.col/row/cols/rows via GridSystem.h.
 //
 // Key responsibilities:
-//   Rendering  — Direct2D: background, header bar, icon bitmaps, labels,
+//   Rendering  ï¿½ Direct2D: background, header bar, icon bitmaps, labels,
 //                selection highlight, drop highlight, expanded label popup
-//   Input      — drag-to-move (title bar), resize (edges/corners via
+//   Input      ï¿½ drag-to-move (title bar), resize (edges/corners via
 //                WM_NCHITTEST), icon click/double-click/right-click
-//   Snap       — WM_EXITSIZEMOVE converts physical pixel position back to
+//   Snap       ï¿½ WM_EXITSIZEMOVE converts physical pixel position back to
 //                col/row (PixelToCol/Row), then re-derives canonical pixels
-//                (FenceWindowX/Y/W/H) — grid is always the truth
-//   OLE D&D    — FenceDropTarget (drop in), FenceDragSource (drag out)
-//   File sync  — FileWatcher triggers re-scan of data folder
+//                (FenceWindowX/Y/W/H) ï¿½ grid is always the truth
+//   OLE D&D    ï¿½ FenceDropTarget (drop in), FenceDragSource (drag out)
+//   File sync  ï¿½ FileWatcher triggers re-scan of data folder
 //
 // Coordinate rule: D2D render target has dpiX=dpiY=96 ? 1 unit = 1 physical
 //                  pixel. All D2D coordinates (CellX/Y, IconRect, LabelRect,
@@ -93,7 +93,7 @@ public:
             nullptr, nullptr, m_hInst, this);
         if (!m_hwnd) return false;
 
-        // Z-order bottom BEFORE showing — prevents Windows from raising us on first paint
+        // Z-order bottom BEFORE showing ï¿½ prevents Windows from raising us on first paint
         SetWindowPos(m_hwnd, HWND_BOTTOM, 0, 0, 0, 0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         ShowWindow(m_hwnd, SW_SHOWNOACTIVATE);
@@ -109,7 +109,7 @@ public:
 		SetWindowLongPtrW(m_hwnd, GWL_STYLE,
 			wstyle & ~WS_MAXIMIZEBOX & ~WS_MINIMIZEBOX);
 
-        // Place at Z-order bottom immediately — WM_WINDOWPOSCHANGING then
+        // Place at Z-order bottom immediately ï¿½ WM_WINDOWPOSCHANGING then
         // prevents anyone from raising us. (NoFences technique)
         SetWindowPos(m_hwnd, HWND_BOTTOM, 0, 0, 0, 0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -120,7 +120,7 @@ public:
         HRESULT hr = m_renderer.Initialize(m_hwnd);
         if (FAILED(hr)) { DebugLog(L"Renderer init failed: 0x%08X", hr); return false; }
 
-        // Snap to grid on creation — size from col/row counts, position from grid
+        // Snap to grid on creation ï¿½ size from col/row counts, position from grid
         {
             float sc = DpiHelper::ScaleForWindow(m_hwnd);
             SetWindowPos(m_hwnd, nullptr,
@@ -142,8 +142,9 @@ public:
 
         // OLE Drag & Drop
         m_dropTarget = new FenceDropTarget(m_hwnd, m_data.id,
-            [this](const std::vector<std::pair<std::wstring,std::wstring>>& items)
-            { OnItemsDropped(items); });
+            [this](const std::vector<std::pair<std::wstring,std::wstring>>& items,
+                   DropAction action)
+            { OnItemsDropped(items, action); });
         RegisterDragDrop(m_hwnd, m_dropTarget);
 
         // Post a deferred render so the icon size COM query runs after the
@@ -172,9 +173,37 @@ public:
 
     bool IsSizingResolved() const { return m_wasSizing; }
 
+    // Hide/show for the desktop double-click toggle. m_hidden is what tells
+    // WM_WINDOWPOSCHANGING to allow the hide it otherwise blocks. Deliberately
+    // not part of FenceData: the state is per-session and never persisted, so
+    // every fence is visible again after a restart.
+    void SetHidden(bool hidden)
+    {
+        if (m_hidden == hidden || !m_hwnd) return;
+        m_hidden = hidden;
+
+        if (hidden)
+        {
+            // Drop any selection first, so its global hooks do not stay live
+            // while the fence is invisible.
+            m_selectedIndex = -1;
+            UninstallSelectionHooks();
+            ShowWindow(m_hwnd, SW_HIDE);
+        }
+        else
+        {
+            ShowWindow(m_hwnd, SW_SHOWNOACTIVATE);
+            SetWindowPos(m_hwnd, HWND_BOTTOM, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            Render();
+        }
+    }
+
+    bool IsHidden() const { return m_hidden; }
+
     FenceData GetData() const
     {
-        // col/row/cols/rows in m_data ARE the truth — always kept up to date.
+        // col/row/cols/rows in m_data ARE the truth ï¿½ always kept up to date.
         // No back-calculation from pixels needed.
         return m_data;
     }
@@ -205,8 +234,8 @@ public:
         // ---- Background ----
         D2D1_ROUNDED_RECT bgRect = D2D1::RoundedRect(
             D2D1::RectF(0.5f, 0.5f, W - 0.5f, H - 0.5f), 10.0f, 10.0f);
-        if (m_bgBrush)    { m_bgBrush->SetOpacity(m_data.alpha); dc->FillRoundedRectangle(bgRect, m_bgBrush.Get()); }
-        if (m_borderBrush) dc->DrawRoundedRectangle(bgRect, m_borderBrush.Get(), 1.0f);
+        if (m_bgBrush) { m_bgBrush->SetOpacity(m_data.alpha); dc->FillRoundedRectangle(bgRect, m_bgBrush.Get()); }
+        // Border is stroked AFTER the header bar below, not here â€” see there.
 
         // ---- Label bar ----
         // Clip to the background rounded rect, then fill the label strip.
@@ -227,6 +256,14 @@ public:
 
             dc->PopLayer();
         }
+
+        // ---- Border, last ----
+        // A 1px stroke is centred on the path, so half of it lies inside the
+        // clip geometry the header bar is filled against. Stroking before that
+        // fill let the header paint over its inner half: the outline vanished
+        // along the top and the upper sides and only survived below the header.
+        // Drawing it after everything keeps one even line the whole way round.
+        if (m_borderBrush) dc->DrawRoundedRectangle(bgRect, m_borderBrush.Get(), 1.0f);
 
         // Label text
         if (m_textFormat && m_textBrush && !m_data.label.empty())
@@ -414,16 +451,32 @@ public:
             if (!entry.is_regular_file()) continue;
             std::wstring path = entry.path().wstring();
 
-            bool found = false;
+            FenceIconEntry* existing = nullptr;
             for (auto& icon : m_data.icons)
                 if (_wcsicmp(icon.parsingName.c_str(), path.c_str()) == 0)
-                    { found = true; break; }
-            if (found) continue;
+                    { existing = &icon; break; }
+
+            if (existing)
+            {
+                // Re-derive the label instead of trusting the snapshot: labels
+                // are persisted in autosave.json, so an entry written by an
+                // older build keeps its stale name (e.g. "Dokument.lnk")
+                // forever otherwise.
+                std::wstring label = GetFenceLabel(path);
+                if (existing->displayName != label)
+                {
+                    DebugLog(L"[Sync] relabel: %s -> %s",
+                        existing->displayName.c_str(), label.c_str());
+                    existing->displayName = label;
+                    changed = true;
+                }
+                continue;
+            }
 
             FenceIconEntry e;
             e.path        = path;
             e.parsingName = path;
-            e.displayName = entry.path().filename().wstring();
+            e.displayName = GetFenceLabel(path);
             m_data.icons.push_back(std::move(e));
             DebugLog(L"[Sync] added: %s", path.c_str());
             changed = true;
@@ -492,12 +545,14 @@ private:
     bool             m_dropHighlight     = false;
     bool             m_isSizing          = false;
     bool             m_wasSizing         = false;
+    bool             m_hidden            = false; // desktop double-click toggle
     int              m_dropHighlightIndex = -1;
     int              m_selectedIndex      = -1;  // icon selection highlight
 
     // Global mouse hook - active only while an icon is selected
     // Detects clicks outside this window so we can deselect
     HHOOK            m_mouseHook          = nullptr;
+    HHOOK            m_keyHook            = nullptr;
 
     // Shell change notification cookie
     ULONG m_shellNotifyCookie = 0;
@@ -505,8 +560,9 @@ private:
     // FileSystem watcher for data folder (catches Cut, Delete, Rename)
     FileWatcher m_fileWatcher;
 
-    // Pending file moves (deferred until after Explorer releases file lock)
-    std::vector<std::wstring> m_pendingMoves;
+    // Pending file operations, (sourcePath, action) â€” deferred until after
+    // Explorer releases the file lock it holds during Drop().
+    std::vector<std::pair<std::wstring, DropAction>> m_pendingOps;
 
     // Drag-out state
     bool             m_dragPending        = false; // mouse down on icon, drag not yet started
@@ -556,7 +612,7 @@ private:
         ComPtr<FenceDragSource> pSource = new FenceDragSource();
 
         m_selectedIndex = -1;
-        UninstallMouseHook();
+        UninstallSelectionHooks();
         Render();
 
         // Blocks until user drops or presses Escape
@@ -692,26 +748,192 @@ private:
         return changed;
     }
 
-    // ---- Selection hook ----
-
-    void InstallMouseHook()
+    // Delete key on the selected icon: removes THAT item and nothing else.
+    // For a shortcut that means the .lnk in the fence's data folder â€” the file
+    // it points at is never touched.
+    void DeleteSelectedIcon()
     {
-        if (m_mouseHook) return;
-        // Store this pointer in thread-local so the static proc can access it
-        s_hookTarget = this;
-        m_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, LowLevelMouseProc,
-            GetModuleHandleW(nullptr), 0);
+        if (m_selectedIndex < 0
+            || m_selectedIndex >= static_cast<int>(m_data.icons.size()))
+            return;
+
+        const std::wstring target = m_data.icons[m_selectedIndex].parsingName;
+
+        // Drop the selection (and with it the hooks) before the shell dialog
+        // runs, so no keystroke is swallowed while the operation is in flight.
+        m_selectedIndex = -1;
+        UninstallSelectionHooks();
+
+        if (FileOps::IsMovable(target))
+        {
+            if (!ShellActions::DeleteToRecycleBin(m_hwnd, target))
+            {
+                DebugLog(L"[Delete] failed for: %s", target.c_str());
+                Render();
+                return;
+            }
+            if (m_iconCache) m_iconCache->Invalidate(target);
+            PruneDeletedIcons(); // file is gone -> entry goes with it
+        }
+        else
+        {
+            // Virtual shell item (Store app, ::{CLSID}): nothing on disk to
+            // delete, so Delete just takes it out of the fence.
+            for (int i = 0; i < static_cast<int>(m_data.icons.size()); ++i)
+                if (_wcsicmp(m_data.icons[i].parsingName.c_str(), target.c_str()) == 0)
+                {
+                    m_data.icons.erase(m_data.icons.begin() + i);
+                    break;
+                }
+            if (m_msgWnd_external)
+                PostMessageW(m_msgWnd_external, WM_APP + 1, 0, 0);
+        }
+
+        Render();
     }
 
-    void UninstallMouseHook()
+    // Arrow-key navigation inside the fence. Icons sit in a row-major grid of
+    // m_data.cols columns, so left/right step by one and up/down by a row.
+    // Movement stops at the edges rather than wrapping â€” a fence is a small,
+    // fully visible grid, and wrapping there reads as the selection jumping.
+    void MoveSelection(UINT vk)
     {
-        if (!m_mouseHook) return;
-        UnhookWindowsHookEx(m_mouseHook);
-        m_mouseHook = nullptr;
-        s_hookTarget = nullptr;
+        const int count = static_cast<int>(m_data.icons.size());
+        if (count == 0 || m_selectedIndex < 0) return;
+
+        const int cols = imax(1, m_data.cols);
+        int idx = m_selectedIndex;
+
+        switch (vk)
+        {
+        case VK_LEFT:  idx -= 1;    break;
+        case VK_RIGHT: idx += 1;    break;
+        case VK_UP:    idx -= cols; break;
+        case VK_DOWN:  idx += cols; break;
+        default: return;
+        }
+
+        if (idx < 0 || idx >= count || idx == m_selectedIndex) return;
+
+        m_selectedIndex = idx;
+        Render();
+    }
+
+    void LaunchSelectedIcon()
+    {
+        if (m_selectedIndex < 0
+            || m_selectedIndex >= static_cast<int>(m_data.icons.size()))
+            return;
+        ShellActions::Launch(m_hwnd, m_data.icons[m_selectedIndex].parsingName);
+    }
+
+    // ---- Selection hooks ----
+    //
+    // A fence is WS_EX_NOACTIVATE and is shown with SW_SHOWNOACTIVATE, so
+    // clicking an icon never gives the window keyboard focus and it never
+    // receives WM_KEYDOWN. Without the keyboard hook below, pressing Delete
+    // over a selected fence icon goes to whatever window actually holds focus â€”
+    // normally the desktop â€” which then deletes ITS OWN selected item. That is
+    // how a Delete aimed at a fence shortcut ended up deleting a desktop file.
+    //
+    // Mouse and keyboard hook share one lifetime and one s_hookTarget, so they
+    // are always installed and removed together.
+
+    void InstallSelectionHooks()
+    {
+        // Store this pointer in a static so the static procs can reach it
+        s_hookTarget = this;
+
+        // Remember who held the foreground, so the hook can tell later whether
+        // the user has moved on (see SelectionStillOwnsKeyboard).
+        s_fgAtSelection = GetForegroundWindow();
+
+        if (!m_mouseHook)
+            m_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, LowLevelMouseProc,
+                GetModuleHandleW(nullptr), 0);
+
+        if (!m_keyHook)
+            m_keyHook = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc,
+                GetModuleHandleW(nullptr), 0);
+    }
+
+    void UninstallSelectionHooks()
+    {
+        if (m_mouseHook) { UnhookWindowsHookEx(m_mouseHook); m_mouseHook = nullptr; }
+        if (m_keyHook)   { UnhookWindowsHookEx(m_keyHook);   m_keyHook   = nullptr; }
+
+        // Only give up the shared target if it is still ours. Clicking from one
+        // fence to another posts the first fence's deselect (WM_APP+53), and
+        // PostMessage is asynchronous: that deselect can run AFTER the second
+        // fence has already claimed s_hookTarget. Clearing it unconditionally
+        // there left the second fence with live hooks but no target, so Delete
+        // and F2 silently stopped working on it.
+        if (s_hookTarget == this) s_hookTarget = nullptr;
     }
 
     static inline FenceWindow* s_hookTarget = nullptr;
+
+    // Foreground window at the moment the selection was made. The keyboard hook
+    // is global, so it needs a rule for when a fence may claim a key.
+    //
+    // Requiring the desktop to be foreground does not work: a fence is
+    // WS_EX_NOACTIVATE, so clicking one never changes the foreground window, and
+    // the user usually clicks a fence straight out of whatever app they were in.
+    // The desktop would then never be foreground and the keys would never arrive.
+    //
+    // What actually matters is that the user has not gone somewhere else since
+    // selecting. Clicking anywhere outside the fence already clears the selection
+    // (WM_APP+53), so the only remaining way to leave is Alt+Tab â€” and that
+    // changes the foreground window. Comparing against the window that was
+    // foreground at selection time covers exactly that case, without stealing
+    // focus from anyone.
+    static inline HWND s_fgAtSelection = nullptr;
+
+    static bool SelectionStillOwnsKeyboard()
+    {
+        return GetForegroundWindow() == s_fgAtSelection;
+    }
+
+    // Keys that act on the selected icon, mirroring Explorer: arrows move the
+    // selection, Enter launches, F2 renames, Delete recycles. Each is swallowed
+    // so it cannot also reach the desktop behind the fence. Everything else,
+    // and everything outside the desktop, is passed straight through.
+    static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wp, LPARAM lp)
+    {
+        if (nCode == HC_ACTION && s_hookTarget
+            && (wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN)
+            && s_hookTarget->m_selectedIndex >= 0
+            && SelectionStillOwnsKeyboard())
+        {
+            auto* info = reinterpret_cast<KBDLLHOOKSTRUCT*>(lp);
+            HWND target = s_hookTarget->m_hwnd;
+
+            switch (info->vkCode)
+            {
+            case VK_DELETE:
+                PostMessageW(target, WM_APP + 62, 0, 0);
+                return 1; // eat it â€” do NOT let the desktop act on this
+
+            case VK_F2:
+                PostMessageW(target, WM_APP + 63,
+                    static_cast<WPARAM>(s_hookTarget->m_selectedIndex), 0);
+                return 1;
+
+            case VK_RETURN:
+                PostMessageW(target, WM_APP + 64, 0, 0);
+                return 1;
+
+            case VK_LEFT:
+            case VK_RIGHT:
+            case VK_UP:
+            case VK_DOWN:
+                PostMessageW(target, WM_APP + 65,
+                    static_cast<WPARAM>(info->vkCode), 0);
+                return 1;
+            }
+        }
+        return CallNextHookEx(nullptr, nCode, wp, lp);
+    }
 
     static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wp, LPARAM lp)
     {
@@ -778,10 +1000,23 @@ private:
 
         float scale = DpiHelper::ScaleForWindow(m_hwnd);
 
-        dc->CreateSolidColorBrush(D2D1::ColorF(0.15f, 0.18f, 0.28f, m_data.alpha), &m_bgBrush);
-        dc->CreateSolidColorBrush(D2D1::ColorF(0.55f, 0.62f, 0.88f, 0.85f),        &m_borderBrush);
-        dc->CreateSolidColorBrush(D2D1::ColorF(0.18f, 0.22f, 0.45f, 0.92f),        &m_labelBgBrush);
-        dc->CreateSolidColorBrush(D2D1::ColorF(1.0f,  1.0f,  1.0f,  0.95f),        &m_textBrush);
+        // Body, header bar and border all derive from the fence's accent colour
+        // so that picking one colour retints the fence as a whole. The header
+        // bar IS the accent colour; the body is a darkened version of it and the
+        // border a lightened one.
+        const float ar = GetRValue(m_data.color) / 255.0f;
+        const float ag = GetGValue(m_data.color) / 255.0f;
+        const float ab = GetBValue(m_data.color) / 255.0f;
+
+        auto shade = [&](float f, float a) { return D2D1::ColorF(ar*f, ag*f, ab*f, a); };
+        auto tint  = [&](float t, float a) {
+            return D2D1::ColorF(ar + (1.0f-ar)*t, ag + (1.0f-ag)*t, ab + (1.0f-ab)*t, a);
+        };
+
+        dc->CreateSolidColorBrush(shade(0.70f, m_data.alpha),        &m_bgBrush);
+        dc->CreateSolidColorBrush(tint (0.52f, 0.85f),               &m_borderBrush);
+        dc->CreateSolidColorBrush(D2D1::ColorF(ar, ag, ab, 0.92f),   &m_labelBgBrush);
+        dc->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.95f), &m_textBrush);
 
         float fontPx = 13.0f * scale;  // physical pixels (D2D dpi=96)
         m_renderer.DWrite()->CreateTextFormat(
@@ -830,7 +1065,8 @@ private:
 
     // ---- Drop handling ----
 
-    void OnItemsDropped(const std::vector<std::pair<std::wstring,std::wstring>>& items)
+    void OnItemsDropped(const std::vector<std::pair<std::wstring,std::wstring>>& items,
+                        DropAction action)
     {
         bool changed = false;
         for (auto& [parsingName, fsPath] : items)
@@ -845,7 +1081,7 @@ private:
             FenceIconEntry entry;
             entry.path        = fsPath.empty() ? parsingName : fsPath;
             entry.parsingName = parsingName;
-            entry.displayName = GetDisplayName(entry.path);
+            entry.displayName = GetFenceLabel(entry.path);
 
             // Also skip if this is literally the same file (e.g. dragged twice)
             // parsingName check above handles exact path match;
@@ -861,9 +1097,9 @@ private:
 
             if (FileOps::IsMovable(parsingName))
             {
-                // Queue the physical move - Explorer still holds the file locked
-                // during Drop(). PostMessage defers until Explorer releases it.
-                m_pendingMoves.push_back(parsingName);
+                // Queue the physical operation - Explorer still holds the file
+                // locked during Drop(). PostMessage defers until it lets go.
+                m_pendingOps.push_back({ parsingName, action });
             }
 
             m_data.icons.push_back(std::move(entry));
@@ -878,42 +1114,45 @@ private:
             if (m_msgWnd_external)
                 PostMessageW(m_msgWnd_external, WM_APP + 1, 0, 0);
 
-            // Deferred move: fires after Explorer finishes its Drop() handling
-            if (!m_pendingMoves.empty())
+            // Deferred op: fires after Explorer finishes its Drop() handling
+            if (!m_pendingOps.empty())
                 PostMessageW(m_hwnd, WM_APP + 55, 0, 0);
         }
     }
 
-    void ProcessPendingMoves()
+    // Runs the queued move/copy/shortcut operations and repoints each icon
+    // entry at the file that now lives in this fence's data folder.
+    void ProcessPendingOps()
     {
-        if (m_pendingMoves.empty()) return;
+        if (m_pendingOps.empty()) return;
 
         bool changed = false;
-        for (const std::wstring& oldPath : m_pendingMoves)
+        for (const auto& [oldPath, action] : m_pendingOps)
         {
             // Find the icon entry that has this parsingName
             for (auto& e : m_data.icons)
             {
                 if (_wcsicmp(e.parsingName.c_str(), oldPath.c_str()) != 0) continue;
 
-                std::wstring newPath = FileOps::MoveToFence(oldPath, m_data.id);
+                std::wstring newPath = FileOps::ApplyToFence(oldPath, m_data.id, action);
                 if (!newPath.empty())
                 {
                     if (m_iconCache) m_iconCache->Invalidate(oldPath);
                     e.path        = newPath;
                     e.parsingName = newPath;
-                    // Update display name to reflect renamed file (e.g. "doc (1).txt")
-                    e.displayName = std::filesystem::path(newPath).filename().wstring();
+                    // Re-query: reflects a collision rename (e.g. "doc (1)") and
+                    // drops the ".lnk" of a freshly created shortcut.
+                    e.displayName = GetFenceLabel(newPath);
                     changed = true;
                 }
                 else
                 {
-                    DebugLog(L"[WinFences] MoveToFence failed for: %s", oldPath.c_str());
+                    DebugLog(L"[WinFences] Drop op failed for: %s", oldPath.c_str());
                 }
                 break;
             }
         }
-        m_pendingMoves.clear();
+        m_pendingOps.clear();
 
         if (changed)
         {
@@ -971,7 +1210,7 @@ private:
     void SnapWindowToGrid()
     {
         float scale = DpiHelper::ScaleForWindow(m_hwnd);
-        // col/row/cols/rows are the truth — re-apply window position/size from them
+        // col/row/cols/rows are the truth ï¿½ re-apply window position/size from them
         SetWindowPos(m_hwnd, nullptr,
             FenceWindowX(m_data.col,  scale),
             FenceWindowY(m_data.row,  scale),
@@ -990,6 +1229,7 @@ private:
     {
         HMENU hMenu = CreatePopupMenu();
         AppendMenuW(hMenu, MF_STRING, 1, L"Rename");
+        AppendMenuW(hMenu, MF_STRING, 5, L"Choose Color...");
         AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(hMenu, MF_STRING, 2, L"Save Snapshot");
         AppendMenuW(hMenu, MF_STRING, 3, L"Restore Snapshot");
@@ -1004,117 +1244,159 @@ private:
         switch (cmd)
         {
         case 1: PromptRename(); break;
+        case 5: PromptChooseColor(); break;
         case 2: if (m_msgWnd_external) SendMessage(m_msgWnd_external, WM_APP+1, 0, 0); break;
         case 3: if (m_msgWnd_external) SendMessage(m_msgWnd_external, WM_APP+2, 0, 0); break;
         case 4: if (m_msgWnd_external) SendMessage(m_msgWnd_external, WM_APP+3, reinterpret_cast<WPARAM>(m_hwnd), 0); break;
         }
     }
 
+    // Standard Windows colour dialog, opened with the fence's current colour
+    // preselected. Custom swatches are static so they survive across fences and
+    // across repeated use within a session.
+    void PromptChooseColor()
+    {
+        static COLORREF s_customColors[16] = {
+            RGB(46,56,115), RGB(38,74,54),  RGB(92,44,44),  RGB(72,52,96),
+            RGB(30,30,30),  RGB(24,58,84),  RGB(96,72,28),  RGB(52,52,60),
+            RGB(255,255,255), RGB(255,255,255), RGB(255,255,255), RGB(255,255,255),
+            RGB(255,255,255), RGB(255,255,255), RGB(255,255,255), RGB(255,255,255),
+        };
+
+        CHOOSECOLORW cc = { sizeof(cc) };
+        cc.hwndOwner    = m_hwnd;
+        cc.rgbResult    = m_data.color;
+        cc.lpCustColors = s_customColors;
+        cc.Flags        = CC_RGBINIT | CC_FULLOPEN | CC_ANYCOLOR;
+
+        if (!ChooseColorW(&cc)) return; // cancelled
+
+        m_data.color = cc.rgbResult;
+        CreateRenderResources(); // rebuild the brushes from the new accent
+        Render();
+
+        // Persist: autosave writes "color" into the fence's snapshot entry.
+        if (m_msgWnd_external)
+            PostMessageW(m_msgWnd_external, WM_APP + 1, 0, 0);
+    }
+
+    // Rename the fence itself: inline editor over its header bar.
     void PromptRename()
     {
-        // Simple rename via InputBox-style dialog using a child window
-        // We create a small popup with an edit control over the label bar
-        struct Dlg {
-            static INT_PTR CALLBACK Proc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp)
-            {
-                switch (msg)
-                {
-                case WM_INITDIALOG:
-                {
-                    // Center over parent
-                    HWND hParent = GetParent(hDlg);
-                    RECT pr, dr;
-                    GetWindowRect(hParent, &pr);
-                    GetWindowRect(hDlg, &dr);
-                    int w = dr.right - dr.left;
-                    int h = dr.bottom - dr.top;
-                    int x = pr.left + (pr.right - pr.left - w) / 2;
-                    int y = pr.top  + (pr.bottom - pr.top - h) / 2;
-                    SetWindowPos(hDlg, nullptr, x, y, 0, 0,
-                        SWP_NOSIZE | SWP_NOZORDER);
-
-                    HWND hEdit = GetDlgItem(hDlg, 100);
-                    // Pre-fill with current label passed via lParam
-                    const wchar_t* cur = reinterpret_cast<const wchar_t*>(lp);
-                    SetWindowTextW(hEdit, cur ? cur : L"");
-                    SendMessageW(hEdit, EM_SETSEL, 0, -1);
-                    SetFocus(hEdit);
-                    return FALSE;
-                }
-                case WM_COMMAND:
-                    if (LOWORD(wp) == IDOK)
-                    {
-                        wchar_t buf[256] = {};
-                        GetDlgItemTextW(hDlg, 100, buf, 256);
-                        // Store result in window prop
-                        wchar_t* result = new wchar_t[256];
-                        wcscpy_s(result, 256, buf);
-                        SetPropW(hDlg, L"Result", result);
-                        EndDialog(hDlg, IDOK);
-                    }
-                    else if (LOWORD(wp) == IDCANCEL)
-                        EndDialog(hDlg, IDCANCEL);
-                    return TRUE;
-                case WM_KEYDOWN:
-                    if (wp == VK_RETURN)  { SendMessageW(hDlg, WM_COMMAND, IDOK,     0); return TRUE; }
-                    if (wp == VK_ESCAPE)  { SendMessageW(hDlg, WM_COMMAND, IDCANCEL, 0); return TRUE; }
-                    break;
-                }
-                return FALSE;
-            }
-        };
-
-        // Build dialog template in memory
-        #pragma pack(push, 1)
-        struct DlgTmpl {
-            DLGTEMPLATE hdr;
-            WORD menu, cls, title;
-            // Edit control
-            DLGITEMTEMPLATE edit;
-            WORD editCls[2];  // 0xFFFF, 0x0081 = EDIT
-            WORD editText;
-            WORD editExtra;
-            // OK button
-            DLGITEMTEMPLATE ok;
-            WORD okCls[2];
-            WORD okText[3];   // "OK "
-            WORD okExtra;
-            // Cancel button
-            DLGITEMTEMPLATE cancel;
-            WORD cancelCls[2];
-            WORD cancelText[8]; // "Cancel "
-            WORD cancelExtra;
-        };
-        #pragma pack(pop)
-
-        // Use MessageBox + GetWindowText pattern instead - simpler and reliable
-        // Create a temporary floating edit window
-        HWND hEdit = CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-            L"EDIT", m_data.label.c_str(),
-            WS_POPUP | WS_BORDER | ES_AUTOHSCROLL | ES_LEFT,
-            0, 0, 300, 28,
-            m_hwnd, nullptr, m_hInst, nullptr);
-
-        if (!hEdit) return;
-
-        // Position over the label bar
         RECT wr;
         GetWindowRect(m_hwnd, &wr);
         float scale = DpiHelper::ScaleForWindow(m_hwnd);
         int labelH = static_cast<int>(Grid_HeaderPx() * scale);
+        RECT editRc = { wr.left, wr.top, wr.right, wr.top + labelH + 4 };
+
+        std::wstring edited;
+        if (!PromptInlineEdit(m_data.label, editRc, 11, FW_SEMIBOLD, edited)) return;
+        if (edited.empty()) return;
+
+        m_data.label = edited;
+        Render();
+        if (m_msgWnd_external)
+            PostMessageW(m_msgWnd_external, WM_APP + 1, 0, 0);
+    }
+
+    // Rename the file behind an icon. A shortcut is renamed as the .lnk it is;
+    // its target is never touched. Explorer supplies this through its folder
+    // view, which a fence does not have, so the editor is ours.
+    void PromptRenameIcon(int idx)
+    {
+        if (idx < 0 || idx >= static_cast<int>(m_data.icons.size())) return;
+
+        const std::wstring oldPath = m_data.icons[idx].parsingName;
+        if (!FileOps::IsMovable(oldPath))
+        {
+            // Virtual shell item (Store app, ::{CLSID}) â€” nothing on disk.
+            DebugLog(L"[Rename] not a file, ignored: %s", oldPath.c_str());
+            return;
+        }
+
+        std::filesystem::path p(oldPath);
+        const std::wstring ext = p.extension().wstring();
+        const bool isLnk = _wcsicmp(ext.c_str(), L".lnk") == 0;
+
+        // Offer exactly the text the fence shows, i.e. a shortcut without its
+        // ".lnk", and put that extension back on the way in.
+        const std::wstring shown = GetFenceLabel(oldPath);
+
+        // Editor over the icon's label, widened so long names stay editable
+        float scale = DpiHelper::ScaleForWindow(m_hwnd);
+        D2D1_RECT_F lbl = LabelRect(idx % m_data.cols, idx / m_data.cols, scale);
+        int cellPhys = static_cast<int>(Grid_CellPx(scale) * scale);
+        RECT rc = { static_cast<LONG>(lbl.left)  - cellPhys / 2,
+                    static_cast<LONG>(lbl.top),
+                    static_cast<LONG>(lbl.right) + cellPhys / 2,
+                    static_cast<LONG>(lbl.top) + static_cast<LONG>(22 * scale) };
+        MapWindowPoints(m_hwnd, nullptr, reinterpret_cast<POINT*>(&rc), 2);
+
+        std::wstring edited;
+        if (!PromptInlineEdit(shown, rc, 10, FW_NORMAL, edited)) return;
+        if (edited == shown) return;
+
+        const std::wstring newName = isLnk ? edited + ext : edited;
+        if (!ShellActions::IsValidFileName(newName))
+        {
+            DebugLog(L"[Rename] rejected name: %s", newName.c_str());
+            return;
+        }
+
+        std::wstring newPath = ShellActions::RenameItem(m_hwnd, oldPath, newName);
+        if (newPath.empty())
+        {
+            DebugLog(L"[Rename] failed: %s -> %s", oldPath.c_str(), newName.c_str());
+            return;
+        }
+
+        if (m_iconCache) m_iconCache->Invalidate(oldPath);
+        for (auto& e : m_data.icons)
+            if (_wcsicmp(e.parsingName.c_str(), oldPath.c_str()) == 0)
+            {
+                e.path        = newPath;
+                e.parsingName = newPath;
+                e.displayName = GetFenceLabel(newPath);
+                break;
+            }
+
+        SortIconsByName(m_data.icons);
+        m_selectedIndex = -1;
+        UninstallSelectionHooks();
+        Render();
+        if (m_msgWnd_external)
+            PostMessageW(m_msgWnd_external, WM_APP + 1, 0, 0);
+    }
+
+    // Floating single-line editor, shared by the fence label and icon renames.
+    // Returns false if the user cancelled with Escape.
+    //
+    // The fence is WS_EX_NOACTIVATE, so a click outside never reaches our queue;
+    // a mouse hook spots it and commits, the same way Explorer's inline rename
+    // behaves.
+    bool PromptInlineEdit(const std::wstring& initial, RECT screenRc,
+                          int fontPt, int fontWeight, std::wstring& out)
+    {
+        HWND hEdit = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            L"EDIT", initial.c_str(),
+            WS_POPUP | WS_BORDER | ES_AUTOHSCROLL | ES_LEFT,
+            0, 0, 300, 28,
+            m_hwnd, nullptr, m_hInst, nullptr);
+        if (!hEdit) return false;
+
         SetWindowPos(hEdit, HWND_TOPMOST,
-            wr.left, wr.top, wr.right - wr.left, labelH + 4,
+            screenRc.left, screenRc.top,
+            screenRc.right - screenRc.left, screenRc.bottom - screenRc.top,
             SWP_SHOWWINDOW);
 
-        // Set font matching the label bar
-        HFONT hFont = reinterpret_cast<HFONT>(
-            SendMessageW(hEdit, WM_GETFONT, 0, 0));
+        HDC hdc = GetDC(hEdit);
         LOGFONTW lf = {};
-        lf.lfHeight = -MulDiv(11, GetDeviceCaps(GetDC(hEdit), LOGPIXELSY), 72);
-        lf.lfWeight = FW_SEMIBOLD;
+        lf.lfHeight = -MulDiv(fontPt, GetDeviceCaps(hdc, LOGPIXELSY), 72);
+        lf.lfWeight = fontWeight;
         wcscpy_s(lf.lfFaceName, L"Segoe UI Variable");
-        hFont = CreateFontIndirectW(&lf);
+        ReleaseDC(hEdit, hdc);
+        HFONT hFont = CreateFontIndirectW(&lf);
         SendMessageW(hEdit, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), TRUE);
 
         SendMessageW(hEdit, EM_SETSEL, 0, -1);
@@ -1163,17 +1445,12 @@ private:
         {
             wchar_t buf[256] = {};
             GetWindowTextW(hEdit, buf, 256);
-            if (wcslen(buf) > 0)
-            {
-                m_data.label = buf;
-                Render();
-                if (m_msgWnd_external)
-                    PostMessageW(m_msgWnd_external, WM_APP + 1, 0, 0);
-            }
+            out = buf;
         }
 
         DestroyWindow(hEdit);
         if (hFont) DeleteObject(hFont);
+        return accepted;
     }
 
     // ---- Window procedure ----
@@ -1204,7 +1481,9 @@ private:
         case WM_WINDOWPOSCHANGING:
         {
             WINDOWPOS* wp2 = reinterpret_cast<WINDOWPOS*>(lp);
-            if (wp2->flags & SWP_HIDEWINDOW)
+            // Normally we refuse to be hidden â€” Show Desktop and friends try it
+            // constantly. m_hidden marks the one case where hiding is ours.
+            if ((wp2->flags & SWP_HIDEWINDOW) && !m_hidden)
                 wp2->flags &= ~SWP_HIDEWINDOW;
             if (!(wp2->flags & SWP_NOZORDER) && wp2->hwndInsertAfter != HWND_BOTTOM)
                 wp2->flags |= SWP_NOZORDER;
@@ -1212,7 +1491,7 @@ private:
         }
         case WM_WINDOWPOSCHANGED:
         {
-            if (!IsWindowVisible(hwnd))
+            if (!m_hidden && !IsWindowVisible(hwnd))
                 ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             break;
         }
@@ -1285,12 +1564,12 @@ private:
             // 1. Read current pixel position/size (only time we read pixels)
             // 2. Convert to nearest col/row (snap)
             // 3. Derive exact pixels back from col/row
-            // 4. Apply to window — now window IS the grid
+            // 4. Apply to window ï¿½ now window IS the grid
 
             float scale = DpiHelper::ScaleForWindow(hwnd);
             RECT wrc; GetWindowRect(hwnd, &wrc);
 
-            // col/row from physical window position — snap to nearest cell
+            // col/row from physical window position ï¿½ snap to nearest cell
             m_data.col = PixelToCol(wrc.left, scale);
             m_data.row = PixelToRow(wrc.top,  scale);
             if (m_isSizing)
@@ -1327,8 +1606,8 @@ private:
             if (m_selectedIndex != idx)
             {
                 m_selectedIndex = idx;
-                if (idx >= 0) InstallMouseHook();
-                else          UninstallMouseHook();
+                if (idx >= 0) InstallSelectionHooks();
+                else          UninstallSelectionHooks();
                 Render();
             }
             // Arm drag via hook (WS_EX_NOACTIVATE windows don't get
@@ -1341,7 +1620,7 @@ private:
                 POINT screenPt = pt;
                 ClientToScreen(hwnd, &screenPt);
                 m_dragStartPt = screenPt;
-                InstallMouseHook(); // hook tracks move+up globally
+                InstallSelectionHooks(); // hook tracks move+up globally
             }
             return 0;
         }
@@ -1380,22 +1659,39 @@ private:
             if (idx >= 0 && idx < static_cast<int>(m_data.icons.size()))
             {
                 m_selectedIndex = idx;
-                InstallMouseHook();
+                InstallSelectionHooks();
                 Render();
                 // Copy parsingName before ShowContextMenu - idx may be stale after return
                 // Use current parsingName from icon (may have been updated by move)
                 std::wstring menuPath = m_data.icons[idx].parsingName;
-                ShellActions::ShowContextMenu(hwnd, menuPath, screenPt);
+                bool renameable = FileOps::IsMovable(menuPath);
+                auto res = ShellActions::ShowContextMenu(hwnd, menuPath, screenPt,
+                                                         renameable);
                 // Always prune after menu closes - handles delete, rename, move
                 PruneDeletedIcons();
+
+                if (res == ShellActions::MenuResult::Rename)
+                {
+                    // Re-find the icon: PruneDeletedIcons may have reordered.
+                    int cur = -1;
+                    for (int i = 0; i < static_cast<int>(m_data.icons.size()); ++i)
+                        if (_wcsicmp(m_data.icons[i].parsingName.c_str(),
+                                     menuPath.c_str()) == 0) { cur = i; break; }
+                    m_selectedIndex = -1; // clear now: PromptRenameIcon only
+                    UninstallSelectionHooks(); // does so when it succeeds
+                    PromptRenameIcon(cur);
+                    Render();
+                    return 0;
+                }
+
                 m_selectedIndex = -1;
-                UninstallMouseHook();
+                UninstallSelectionHooks();
                 Render();
             }
             else
             {
                 m_selectedIndex = -1;
-                UninstallMouseHook();
+                UninstallSelectionHooks();
                 Render();
                 ShowFenceContextMenu(screenPt);
             }
@@ -1435,13 +1731,30 @@ private:
             if (m_selectedIndex != -1)
             {
                 m_selectedIndex = -1;
-                UninstallMouseHook();
+                UninstallSelectionHooks();
                 Render();
             }
             return 0;
 
         case WM_APP + 56: // Deferred prune after context menu close
             PruneDeletedIcons();
+            return 0;
+
+        case WM_APP + 62: // Delete key on the selected icon (from the key hook)
+            DeleteSelectedIcon();
+            return 0;
+
+        case WM_APP + 63: // F2 on the selected icon (from the key hook)
+            UninstallSelectionHooks();
+            PromptRenameIcon(static_cast<int>(wp));
+            return 0;
+
+        case WM_APP + 64: // Enter on the selected icon
+            LaunchSelectedIcon();
+            return 0;
+
+        case WM_APP + 65: // Arrow key: move the selection (wp = virtual key)
+            MoveSelection(static_cast<UINT>(wp));
             return 0;
 
         case WM_APP + 58: // FileWatcher or ShellNotify: file changed in data folder
@@ -1452,19 +1765,19 @@ private:
         case WM_APP + 54: // Begin drag-out (posted from low-level mouse hook)
         {
             int dragIdx = static_cast<int>(wp);
-            UninstallMouseHook();
+            UninstallSelectionHooks();
             BeginDragOut(dragIdx);
             return 0;
         }
 
-        case WM_APP + 55: // Process deferred file moves (after Explorer releases lock)
-            ProcessPendingMoves();
+        case WM_APP + 55: // Process deferred file ops (after Explorer releases lock)
+            ProcessPendingOps();
             return 0;
 
         case WM_DESTROY:
             m_fileWatcher.Stop();
             UnregisterShellNotify();
-            UninstallMouseHook();
+            UninstallSelectionHooks();
             RevokeDragDrop(hwnd);
             m_hwnd = nullptr;
             return 0;

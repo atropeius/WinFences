@@ -44,6 +44,11 @@ public:
         RegisterHotKey(m_msgWnd, HOTKEY_RESTORE, MOD_CONTROL | MOD_ALT, 'R');
         RegisterHotKey(m_msgWnd, HOTKEY_NEW,     MOD_CONTROL | MOD_ALT, 'N');
 
+        // Watch for a double-click on the empty desktop (hide/show all fences)
+        s_desktopHookOwner = this;
+        m_desktopHook = SetWindowsHookExW(WH_MOUSE_LL, DesktopClickProc,
+            GetModuleHandleW(nullptr), 0);
+
         // Try to load last snapshot on startup
         auto snap = SnapshotStore::LoadStartup();
         if (snap) RestoreSnapshot(*snap);
@@ -56,10 +61,87 @@ public:
         // Autosave current state before exit so next startup restores correctly
         AutoSave();
 
+        if (m_desktopHook)
+        {
+            UnhookWindowsHookEx(m_desktopHook);
+            m_desktopHook = nullptr;
+        }
+        s_desktopHookOwner = nullptr;
+
         UnregisterHotKey(m_msgWnd, HOTKEY_SAVE);
         UnregisterHotKey(m_msgWnd, HOTKEY_RESTORE);
         UnregisterHotKey(m_msgWnd, HOTKEY_NEW);
         m_fences.clear();
+    }
+
+    // ---- Desktop double-click: hide / show every fence ----
+    //
+    // A low-level mouse hook never sees WM_LBUTTONDBLCLK — that message is
+    // synthesised per window by the window manager — so the double-click is
+    // recognised here from two button-ups inside the system's double-click time
+    // and slop. The hook itself only measures and posts; deciding whether the
+    // click landed on empty desktop needs to talk to Explorer, and that must
+    // not happen inside a hook procedure.
+
+    static inline FenceManager* s_desktopHookOwner = nullptr;
+
+    static LRESULT CALLBACK DesktopClickProc(int nCode, WPARAM wp, LPARAM lp)
+    {
+        if (nCode == HC_ACTION && wp == WM_LBUTTONUP && s_desktopHookOwner)
+            s_desktopHookOwner->OnGlobalClick(
+                reinterpret_cast<MSLLHOOKSTRUCT*>(lp)->pt);
+        return CallNextHookEx(nullptr, nCode, wp, lp);
+    }
+
+    void OnGlobalClick(POINT pt)
+    {
+        const DWORD now = GetTickCount();
+        const bool isDouble =
+               (now - m_lastClickTime) <= GetDoubleClickTime()
+            && abs(pt.x - m_lastClickPt.x) <= GetSystemMetrics(SM_CXDOUBLECLK)
+            && abs(pt.y - m_lastClickPt.y) <= GetSystemMetrics(SM_CYDOUBLECLK);
+
+        m_lastClickPt   = pt;
+        m_lastClickTime = now;
+
+        if (!isDouble) return;
+        m_lastClickTime = 0; // so a triple click does not toggle twice
+
+        PostMessageW(m_msgWnd, WM_APP + 61,
+            static_cast<WPARAM>(pt.x), static_cast<LPARAM>(pt.y));
+    }
+
+    // True when the point is on the desktop background rather than on a desktop
+    // icon or any other window. The desktop is a SysListView32 hosted by
+    // SHELLDLL_DefView under Progman or a WorkerW; a hit on an icon leaves that
+    // listview with a selection, an empty-area click clears it.
+    static bool IsEmptyDesktopPoint(POINT pt)
+    {
+        HWND under = WindowFromPoint(pt);
+        if (!under) return false;
+
+        wchar_t cls[64] = {};
+        GetClassNameW(under, cls, static_cast<int>(std::size(cls)));
+
+        if (_wcsicmp(cls, L"SysListView32") == 0)
+        {
+            DWORD_PTR selected = 0;
+            // Explorer owns this window; never block on it.
+            if (!SendMessageTimeoutW(under, LVM_GETSELECTEDCOUNT, 0, 0,
+                    SMTO_ABORTIFHUNG | SMTO_BLOCK, 200, &selected))
+                return false;
+            return selected == 0;
+        }
+
+        return _wcsicmp(cls, L"Progman") == 0 || _wcsicmp(cls, L"WorkerW") == 0;
+    }
+
+    void ToggleFenceVisibility()
+    {
+        m_fencesHidden = !m_fencesHidden;
+        for (auto& f : m_fences)
+            f->SetHidden(m_fencesHidden);
+        DebugLog(L"[Toggle] fences %s", m_fencesHidden ? L"hidden" : L"shown");
     }
 
     // ---- Message dispatch (call from WndProc of msgWnd) ----
@@ -91,6 +173,14 @@ break;
             HWND movedHwnd = reinterpret_cast<HWND>(wp);
             ResolveCollision(movedHwnd);
             AutoSave();
+            return true;
+        }
+
+        case WM_APP + 61: // Desktop double-click (posted from the mouse hook)
+        {
+            POINT pt = { static_cast<LONG>(static_cast<int>(wp)),
+                         static_cast<LONG>(static_cast<int>(lp)) };
+            if (IsEmptyDesktopPoint(pt)) ToggleFenceVisibility();
             return true;
         }
 
@@ -127,6 +217,9 @@ break;
         // Re-set after restore when fences are rebuilt from scratch.
         m_fences.push_back(std::move(fence));
         m_iconCache.SetRenderer(&m_fences[0]->GetRenderer_Hack());
+
+        // Created while the fences are toggled off: stay consistent with them.
+        if (m_fencesHidden) ptr->SetHidden(true);
 
         return ptr;
     }
@@ -245,7 +338,28 @@ break;
             }
         }
 
-        // For move: spiral search for nearest free (col,row)
+        // For move: spiral search for nearest free (col,row).
+        //
+        // Candidates must stay inside the work area. Without that check the
+        // search only rejected negative col/row, so a fence with no free spot
+        // nearby was happily relocated up to 199 cells away — off the screen
+        // entirely, which looks exactly like the fence vanishing.
+        MONITORINFO mi = { sizeof(mi) };
+        HMONITOR hmon  = MonitorFromWindow(movedHwnd, MONITOR_DEFAULTTONEAREST);
+        bool haveWork  = GetMonitorInfoW(hmon, &mi) != FALSE;
+        float scale    = DpiHelper::ScaleForMonitor(hmon);
+
+        auto onScreen = [&](const Occupancy& o)
+        {
+            if (!haveWork) return true;
+            int left   = FenceWindowX(o.col,  scale);
+            int top    = FenceWindowY(o.row,  scale);
+            int right  = left + FenceWindowW(o.cols, scale);
+            int bottom = top  + FenceWindowH(o.rows, scale);
+            return left  >= mi.rcWork.left  && top    >= mi.rcWork.top
+                && right <= mi.rcWork.right && bottom <= mi.rcWork.bottom;
+        };
+
         int origCol = movedOcc.col, origRow = movedOcc.row;
         for (int r = 1; r < 200; ++r)
         for (int dy = -r; dy <= r; ++dy)
@@ -256,6 +370,7 @@ break;
             cand.col = origCol + dx;
             cand.row = origRow + dy;
             if (cand.col < 0 || cand.row < 0) continue;
+            if (!onScreen(cand)) continue;
 
             bool free = true;
             for (auto& fw : m_fences)
@@ -271,6 +386,10 @@ break;
             DebugLog(L"[Grid] resolved col=%d row=%d", cand.col, cand.row);
             return;
         }
+
+        // Nothing free on screen: leave the fence where the user put it.
+        // Overlapping but visible beats tidy but gone.
+        DebugLog(L"[Grid] no free on-screen slot — leaving fence in place");
     }
 
     std::wstring GenerateFenceId()
@@ -317,7 +436,20 @@ break;
         int centerPhysY = mi.rcWork.top  + (mi.rcWork.bottom - mi.rcWork.top  - fenceH) / 2 + offset;
         data.col = PixelToCol(centerPhysX, scale);
         data.row = PixelToRow(centerPhysY, scale);
-        CreateFence(data);
+
+        FenceWindow* fence = CreateFence(data);
+
+        // Resolve straight away instead of waiting for the first interaction.
+        // The offset above is a single cell, so a new fence is normally born
+        // overlapping an existing one; collisions were only resolved on
+        // WM_EXITSIZEMOVE, and clicking a fence's title bar enters Windows'
+        // modal move loop and fires that even without any movement. The fence
+        // therefore sat overlapping until the user's first click, then jumped.
+        if (fence && fence->GetHwnd())
+        {
+            ResolveCollision(fence->GetHwnd());
+            AutoSave();
+        }
     }
 
     // ---- Snapshot ----
@@ -388,6 +520,13 @@ private:
     IconCache  m_iconCache;
 
     std::vector<std::unique_ptr<FenceWindow>> m_fences;
+
+    // Desktop double-click toggle. m_fencesHidden is session-only on purpose —
+    // it is never written to a snapshot, so a restart always shows every fence.
+    HHOOK  m_desktopHook   = nullptr;
+    bool   m_fencesHidden  = false;
+    POINT  m_lastClickPt   = {};
+    DWORD  m_lastClickTime = 0;
 
     void ShowNotification(const wchar_t* msg)
     {
