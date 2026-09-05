@@ -324,6 +324,47 @@ private:
         return imax(maxX - minX + 1, maxY - minY + 1);
     }
 
+    // Shell item for a shortcut's target, when the target's icon is the one to
+    // use. Returns false for anything that is not a .lnk, for a shortcut that
+    // carries an icon of its own, and when the target cannot be resolved.
+    //
+    // Needed because the shell can fail to produce an icon for a .lnk whose
+    // target is a packaged (Store) app: asking about the shortcut returns the
+    // generic blank-document icon while the target resolves fine and has a
+    // perfectly good one. Verified with a WhatsApp shortcut — blank page via the
+    // .lnk, the real logo via its AppsFolder target. Explorer shows the target's
+    // icon for a shortcut anyway, so asking the target is also the truer answer;
+    // the arrow overlay is drawn separately and is unaffected.
+    static bool ResolveLinkTarget(const std::wstring& path, ComPtr<IShellItem>& out)
+    {
+        if (path.size() <= 4
+            || _wcsicmp(path.c_str() + path.size() - 4, L".lnk") != 0)
+            return false;
+
+        ComPtr<IShellLinkW> link;
+        if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
+                IID_PPV_ARGS(&link))))
+            return false;
+
+        ComPtr<IPersistFile> pf;
+        if (FAILED(link.As(&pf)) || FAILED(pf->Load(path.c_str(), STGM_READ)))
+            return false;
+
+        // An icon set on the shortcut itself must win over the target's.
+        wchar_t iconPath[MAX_PATH] = {};
+        int iconIdx = 0;
+        if (SUCCEEDED(link->GetIconLocation(iconPath, MAX_PATH, &iconIdx))
+            && iconPath[0] != L'\0')
+            return false;
+
+        PIDLIST_ABSOLUTE pidl = nullptr;
+        if (FAILED(link->GetIDList(&pidl)) || !pidl) return false;
+
+        HRESULT hr = SHCreateItemFromIDList(pidl, IID_PPV_ARGS(&out));
+        CoTaskMemFree(pidl);
+        return SUCCEEDED(hr) && out;
+    }
+
     // One GetImage call, wrapped as a WIC bitmap.
     static HRESULT LoadViaImageFactory(IShellItemImageFactory* factory, int px,
                                        IWICImagingFactory* wicFactory,
@@ -362,13 +403,23 @@ private:
         }
 
         // Strategy 1: IShellItemImageFactory -> HBITMAP -> WIC
+        //
+        // Two candidates, in order: a shortcut's target (see ResolveLinkTarget)
+        // and the item itself. The target is tried first because the shell can
+        // fail to give a .lnk an icon at all; the item is the fallback and the
+        // only candidate for everything that is not a shortcut.
         {
-            ComPtr<IShellItem> shellItem;
+            ComPtr<IShellItem> candidates[2];
+            int count = 0;
+            if (ResolveLinkTarget(path, candidates[count])) ++count;
             if (SUCCEEDED(SHCreateItemFromParsingName(
-                    path.c_str(), nullptr, IID_PPV_ARGS(&shellItem))))
+                    path.c_str(), nullptr, IID_PPV_ARGS(&candidates[count]))))
+                ++count;
+
+            for (int c = 0; c < count; ++c)
             {
                 ComPtr<IShellItemImageFactory> factory;
-                if (SUCCEEDED(shellItem.As(&factory)))
+                if (SUCCEEDED(candidates[c].As(&factory)))
                 {
                     ComPtr<IWICBitmap> loaded;
                     if (SUCCEEDED(LoadViaImageFactory(factory.Get(), px,
