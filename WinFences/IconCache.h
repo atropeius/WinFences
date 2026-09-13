@@ -195,6 +195,43 @@ private:
         return d2dBmp.Get();
     }
 
+    // Bring a bitmap down to the size it will be drawn at, once, using a filter
+    // that actually looks at every source pixel.
+    //
+    // DrawBitmap's D2D1_BITMAP_INTERPOLATION_MODE_LINEAR samples 2x2 texels, so
+    // minifying a 256px package asset into a ~60px slot skips over 90% of the
+    // source and the edges come out ragged. WIC's Fant filter averages across
+    // the whole area instead. Doing it here means it happens once per cache
+    // entry rather than on every paint, and leaves D2D a near-1:1 draw.
+    static HRESULT FitToSize(IWICImagingFactory* wf, IWICBitmap* src, int px,
+                             IWICBitmap** out)
+    {
+        UINT w = 0, h = 0;
+        if (FAILED(src->GetSize(&w, &h)) || !w || !h) return E_FAIL;
+
+        const UINT target = static_cast<UINT>(px);
+        if (w <= target && h <= target)
+        {
+            *out = src;      // already at or below the drawn size
+            src->AddRef();
+            return S_OK;
+        }
+
+        // Keep the aspect ratio; icons are square but assets need not be.
+        UINT nw = target, nh = target;
+        if (w > h)      nh = (h * target + w / 2) / w;
+        else if (h > w) nw = (w * target + h / 2) / h;
+        if (!nw) nw = 1;
+        if (!nh) nh = 1;
+
+        ComPtr<IWICBitmapScaler> scaler;
+        if (FAILED(wf->CreateBitmapScaler(&scaler))) return E_FAIL;
+        if (FAILED(scaler->Initialize(src, nw, nh, WICBitmapInterpolationModeFant)))
+            return E_FAIL;
+
+        return wf->CreateBitmapFromSource(scaler.Get(), WICBitmapCacheOnLoad, out);
+    }
+
     // Get or load WIC bitmap (device-independent)
     IWICBitmap* GetWICBitmap(const std::wstring& key, const std::wstring& path, int px)
     {
@@ -206,6 +243,11 @@ private:
         // next paint simply asks again.
         ComPtr<IWICBitmap> wic;
         if (FAILED(LoadWIC(path, px, &wic)) || !wic) return nullptr;
+
+        IWICImagingFactory* wf = m_renderer ? m_renderer->WIC() : nullptr;
+        ComPtr<IWICBitmap> fitted;
+        if (wf && SUCCEEDED(FitToSize(wf, wic.Get(), px, &fitted)) && fitted)
+            wic = fitted;
 
         m_wicCache[key] = wic;
         return wic.Get();
