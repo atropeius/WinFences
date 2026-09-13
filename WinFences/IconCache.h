@@ -201,13 +201,13 @@ private:
         if (it != m_wicCache.end())
             return it->second.Get();
 
+        // A failed load is deliberately not cached: nothing is stored, so the
+        // next paint simply asks again.
         ComPtr<IWICBitmap> wic;
-        if (SUCCEEDED(LoadWIC(path, px, &wic)))
-        {
-            m_wicCache[key] = wic;
-            return wic.Get();
-        }
-        return nullptr;
+        if (FAILED(LoadWIC(path, px, &wic)) || !wic) return nullptr;
+
+        m_wicCache[key] = wic;
+        return wic.Get();
     }
 
     // Convert WIC bitmap to D2D bitmap for a specific render target
@@ -365,14 +365,40 @@ private:
         return SUCCEEDED(hr) && out;
     }
 
+    // Flags for GetImage.
+    //
+    // ICONONLY is the right default: a fence shows icons, not document previews,
+    // so a .jpg must not turn into a photo of itself. But a packaged (Store) app
+    // has no classic icon at all — its logo lives in the package assets and the
+    // shell serves it through the thumbnail path. ICONONLY forbids exactly that
+    // path, so for those items it hands back the blank-page placeholder instead.
+    // Measured on an Owlfiles shortcut: ICONONLY gives the blank page, the same
+    // call without it gives the real logo.
+    //
+    // A packaged app's shell item is not a filesystem object, which separates
+    // the two cases exactly and for free (verified: Store targets report no
+    // SFGAO_FILESYSTEM, chrome.exe and a .CRW file report it). SCALEUP fills the
+    // frame instead of centring a smaller image in it.
+    static constexpr int FLAGS_ICON     = SIIGBF_RESIZETOFIT | SIIGBF_ICONONLY;
+    static constexpr int FLAGS_PACKAGED = SIIGBF_RESIZETOFIT | SIIGBF_SCALEUP;
+
+    static int ImageFlagsFor(IShellItem* item)
+    {
+        SFGAOF attr = 0;
+        bool fileSystem = item
+            && SUCCEEDED(item->GetAttributes(SFGAO_FILESYSTEM, &attr))
+            && (attr & SFGAO_FILESYSTEM);
+        return fileSystem ? FLAGS_ICON : FLAGS_PACKAGED;
+    }
+
     // One GetImage call, wrapped as a WIC bitmap.
     static HRESULT LoadViaImageFactory(IShellItemImageFactory* factory, int px,
-                                       IWICImagingFactory* wicFactory,
+                                       int flags, IWICImagingFactory* wicFactory,
                                        IWICBitmap** ppWic)
     {
         HBITMAP hbm = nullptr;
         SIZE sz = { px, px };
-        HRESULT hr = factory->GetImage(sz, SIIGBF_RESIZETOFIT | SIIGBF_ICONONLY, &hbm);
+        HRESULT hr = factory->GetImage(sz, flags, &hbm);
         if (FAILED(hr) || !hbm) return FAILED(hr) ? hr : E_FAIL;
 
         hr = wicFactory->CreateBitmapFromHBITMAP(hbm, nullptr, WICBitmapUseAlpha, ppWic);
@@ -421,9 +447,11 @@ private:
                 ComPtr<IShellItemImageFactory> factory;
                 if (SUCCEEDED(candidates[c].As(&factory)))
                 {
+                    const int imageFlags = ImageFlagsFor(candidates[c].Get());
+
                     ComPtr<IWICBitmap> loaded;
                     if (SUCCEEDED(LoadViaImageFactory(factory.Get(), px,
-                            wicFactory, &loaded)) && loaded)
+                            imageFlags, wicFactory, &loaded)) && loaded)
                     {
                         // SIIGBF_RESIZETOFIT only ever shrinks. An item whose
                         // largest icon is smaller than the requested size comes
@@ -439,7 +467,8 @@ private:
                             ComPtr<IWICBitmap> tight;
                             if (native < px
                                 && SUCCEEDED(LoadViaImageFactory(factory.Get(),
-                                       native, wicFactory, &tight)) && tight)
+                                       native, imageFlags, wicFactory, &tight))
+                                && tight)
                                 loaded = tight;
                         }
 
@@ -465,7 +494,7 @@ private:
                 {
                     hr = wicFactory->CreateBitmapFromHICON(hIcon, ppWic);
                     DestroyIcon(hIcon);
-                    if (SUCCEEDED(hr)) return hr;
+                    if (SUCCEEDED(hr)) return S_OK;
                 }
             }
         }
