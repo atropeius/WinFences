@@ -21,6 +21,7 @@
 #include <commctrl.h>
 #pragma comment(lib, "comctl32.lib")
 #include "Renderer.h"
+#include "PackageIcon.h"
 
 // ---------------------------------------------------------------------------
 // IconCache
@@ -382,13 +383,57 @@ private:
     static constexpr int FLAGS_ICON     = SIIGBF_RESIZETOFIT | SIIGBF_ICONONLY;
     static constexpr int FLAGS_PACKAGED = SIIGBF_RESIZETOFIT | SIIGBF_SCALEUP;
 
-    static int ImageFlagsFor(IShellItem* item)
+    static bool IsFileSystemItem(IShellItem* item)
     {
         SFGAOF attr = 0;
-        bool fileSystem = item
+        return item
             && SUCCEEDED(item->GetAttributes(SFGAO_FILESYSTEM, &attr))
             && (attr & SFGAO_FILESYSTEM);
-        return fileSystem ? FLAGS_ICON : FLAGS_PACKAGED;
+    }
+
+    static int ImageFlagsFor(IShellItem* item)
+    {
+        return IsFileSystemItem(item) ? FLAGS_ICON : FLAGS_PACKAGED;
+    }
+
+    // A packaged app's own logo file, when the package has one at least as large
+    // as we are about to draw. The package states its resolution, which the
+    // shell does not, so this is the one comparison that can be made honestly —
+    // and the shell's app-list icon is often a small unplated variant scaled up.
+    // Anything smaller than needed is left to the shell.
+    HRESULT LoadFromPackage(IShellItem* item, int px,
+                            IWICImagingFactory* wicFactory, IWICBitmap** ppWic)
+    {
+        if (!item || IsFileSystemItem(item)) return E_FAIL;
+
+        PWSTR parsing = nullptr;
+        if (FAILED(item->GetDisplayName(SIGDN_DESKTOPABSOLUTEPARSING, &parsing))
+            || !parsing)
+            return E_FAIL;
+        std::wstring aumid(parsing);
+        CoTaskMemFree(parsing);
+
+        int assetPx = 0;
+        std::wstring file = PackageIcon::FindLogo(aumid, assetPx);
+        if (file.empty() || assetPx < px) return E_FAIL;
+
+        ComPtr<IWICBitmapDecoder> dec;
+        if (FAILED(wicFactory->CreateDecoderFromFilename(file.c_str(), nullptr,
+                GENERIC_READ, WICDecodeMetadataCacheOnDemand, &dec)))
+            return E_FAIL;
+
+        ComPtr<IWICBitmapFrameDecode> frame;
+        if (FAILED(dec->GetFrame(0, &frame))) return E_FAIL;
+
+        ComPtr<IWICFormatConverter> conv;
+        if (FAILED(wicFactory->CreateFormatConverter(&conv))) return E_FAIL;
+        if (FAILED(conv->Initialize(frame.Get(), GUID_WICPixelFormat32bppBGRA,
+                WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom)))
+            return E_FAIL;
+
+        DebugLog(L"[Icon] package asset %dpx for %s", assetPx, aumid.c_str());
+        return wicFactory->CreateBitmapFromSource(conv.Get(),
+            WICBitmapCacheOnLoad, ppWic);
     }
 
     // One GetImage call, wrapped as a WIC bitmap.
@@ -444,6 +489,12 @@ private:
 
             for (int c = 0; c < count; ++c)
             {
+                // A packaged app's own asset beats the shell's app-list icon
+                // whenever it is big enough; for a plain file this does nothing.
+                if (SUCCEEDED(LoadFromPackage(candidates[c].Get(), px,
+                        wicFactory, ppWic)) && *ppWic)
+                    return S_OK;
+
                 ComPtr<IShellItemImageFactory> factory;
                 if (SUCCEEDED(candidates[c].As(&factory)))
                 {
